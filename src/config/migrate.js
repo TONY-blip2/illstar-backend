@@ -157,6 +157,13 @@ async function migrate() {
       user:     process.env.DB_USER     || 'root',
       password: process.env.DB_PASSWORD || '',
       multipleStatements: true,
+      // TiDB Cloud (and most managed MySQL providers) require TLS. This was
+      // missing before, which is almost certainly why the connection was
+      // failing silently — without this, TiDB rejects the connection during
+      // the TLS handshake before a normal, readable error even gets formed.
+      ssl: process.env.DB_SSL === 'true'
+        ? { minVersion: 'TLSv1.2', rejectUnauthorized: true }
+        : undefined,
     });
 
     // Create DB if it doesn't exist
@@ -169,7 +176,18 @@ async function migrate() {
     await conn.query(SQL);
     logger.info('✅  Migration complete — all tables created/verified');
   } catch (err) {
-    logger.error('❌  Migration failed:', err.message);
+    // Dump EVERYTHING about the error, not just .message — some driver-level
+    // failures (like TLS handshake errors) don't populate .message the way
+    // a normal thrown Error does, which is why this printed nothing useful
+    // before. code/errno/sqlState/sqlMessage cover the MySQL-specific cases;
+    // the full `err` object covers anything else (network errors, etc.).
+    logger.error('❌  Migration failed. Full error details below:');
+    logger.error(`   message:    ${err.message}`);
+    logger.error(`   code:       ${err.code}`);
+    logger.error(`   errno:      ${err.errno}`);
+    logger.error(`   sqlState:   ${err.sqlState}`);
+    logger.error(`   sqlMessage: ${err.sqlMessage}`);
+    console.error(err);
     process.exit(1);
   } finally {
     if (conn) await conn.end();
