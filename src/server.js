@@ -23,14 +23,20 @@ const userRoutes    = require('./routes/users');
 
 const app = express();
 
-const uploadDirs = ['uploads/products', 'uploads/avatars'];
-uploadDirs.forEach(dir => {
-  const fullPath = path.join(__dirname, '..', dir);
-  if (!fs.existsSync(fullPath)) {
-    fs.mkdirSync(fullPath, { recursive: true });
-    logger.info(`Created upload directory: ${dir}`);
-  }
-});
+// Creating local directories on disk only makes sense outside of Vercel's
+// read-only serverless filesystem. Guard this so it doesn't throw in
+// production — it's only useful for local development anyway, since
+// production uploads go through Cloudinary (see utils/upload.js).
+if (!process.env.VERCEL) {
+  const uploadDirs = ['uploads/products', 'uploads/avatars'];
+  uploadDirs.forEach(dir => {
+    const fullPath = path.join(__dirname, '..', dir);
+    if (!fs.existsSync(fullPath)) {
+      fs.mkdirSync(fullPath, { recursive: true });
+      logger.info(`Created upload directory: ${dir}`);
+    }
+  });
+}
 
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
@@ -83,6 +89,9 @@ if (process.env.NODE_ENV !== 'test') {
   }));
 }
 
+// Local static uploads folder — only relevant for local dev (see note above).
+// In production this route simply won't have anything to serve from, which
+// is fine since Cloudinary URLs are used instead.
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 app.get('/api/health', (req, res) => {
@@ -103,43 +112,58 @@ app.use('/api/users',    userRoutes);
 app.use(notFound);
 app.use(errorHandler);
 
+// This is the part Vercel actually needs: an exported Express app that its
+// @vercel/node runtime wraps as a serverless function. Nothing below this
+// line should run when Vercel imports this file.
 module.exports = app;
 
-const PORT = parseInt(process.env.PORT || '5000');
+// ─────────────────────────────────────────────────────────────────────────
+// Everything below only runs when this file is executed DIRECTLY (i.e.
+// `node src/server.js` on your own machine or a traditional host). Vercel's
+// runtime imports this file purely to read `module.exports` above — it does
+// NOT execute it as `node server.js`, so require.main !== module in that
+// context, and none of this code runs there. Without this guard, Vercel was
+// running testConnection() + app.listen() + registering process.exit()
+// handlers on every cold start, which is almost certainly why requests were
+// never reaching a stable, responding function.
+// ─────────────────────────────────────────────────────────────────────────
+if (require.main === module) {
+  const PORT = parseInt(process.env.PORT || '5000');
 
-async function start() {
-  await testConnection();
+  async function start() {
+    await testConnection();
 
-  const server = app.listen(PORT, () => {
-    logger.info(`🚀  ILLSTAR API running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
-    logger.info(`    Health: http://localhost:${PORT}/api/health`);
-  });
-
-  const shutdown = (signal) => {
-    logger.info(`${signal} received — shutting down gracefully…`);
-    server.close(async () => {
-      const { pool } = require('./config/database');
-      await pool.end();
-      logger.info('MySQL pool closed. Goodbye.');
-      process.exit(0);
+    const server = app.listen(PORT, () => {
+      logger.info(`🚀  ILLSTAR API running on port ${PORT} [${process.env.NODE_ENV || 'development'}]`);
+      logger.info(`    Health: http://localhost:${PORT}/api/health`);
     });
 
-    setTimeout(() => {
-      logger.error('Forced shutdown after timeout.');
+    const shutdown = (signal) => {
+      logger.info(`${signal} received — shutting down gracefully…`);
+      server.close(async () => {
+        const { pool } = require('./config/database');
+        await pool.end();
+        logger.info('MySQL pool closed. Goodbye.');
+        process.exit(0);
+      });
+
+      setTimeout(() => {
+        logger.error('Forced shutdown after timeout.');
+        process.exit(1);
+      }, 10_000);
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT',  () => shutdown('SIGINT'));
+
+    process.on('unhandledRejection', (reason) => {
+      logger.error('Unhandled promise rejection:', reason);
+    });
+    process.on('uncaughtException', (err) => {
+      logger.error('Uncaught exception:', err);
       process.exit(1);
-    }, 10_000);
-  };
+    });
+  }
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT',  () => shutdown('SIGINT'));
-
-  process.on('unhandledRejection', (reason) => {
-    logger.error('Unhandled promise rejection:', reason);
-  });
-  process.on('uncaughtException', (err) => {
-    logger.error('Uncaught exception:', err);
-    process.exit(1);
-  });
+  start();
 }
-
-start();
