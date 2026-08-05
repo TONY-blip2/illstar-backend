@@ -11,22 +11,11 @@ const pool = mysql.createPool({
   user:               process.env.DB_USER     || 'root',
   password:           process.env.DB_PASSWORD || 'rootpss',
   waitForConnections: true,
-  // On Vercel, every concurrent serverless invocation can spin up its own
-  // pool (module state is only reused within a single warm instance, not
-  // shared across instances). A connectionLimit of 10 per instance can blow
-  // past your database's total connection cap under even light concurrent
-  // traffic. Set DB_POOL_MAX=2 (or similar) as a Vercel environment variable
-  // in production — locally it'll still default to 10.
   connectionLimit:    parseInt(process.env.DB_POOL_MAX    || '10'),
   queueLimit:         0,
   enableKeepAlive:    true,
   keepAliveInitialDelay: 0,
-  // Return dates as strings (avoids timezone surprises)
   dateStrings: true,
-  // Managed MySQL providers (TiDB Serverless, PlanetScale, etc.) require
-  // TLS. Set DB_SSL=true as a Vercel environment variable when connecting
-  // to one of those — leave it unset for local MySQL, which usually isn't
-  // configured for SSL.
   ssl: process.env.DB_SSL === 'true'
     ? { minVersion: 'TLSv1.2', rejectUnauthorized: true }
     : undefined,
@@ -39,23 +28,47 @@ async function testConnection() {
     logger.info('✅  MySQL connected successfully');
     conn.release();
   } catch (err) {
-    // Do NOT process.exit() here. On a traditional server that's a fine way
-    // to fail fast and let a process manager restart you. Inside a Vercel
-    // serverless function, process.exit() can kill the execution
-    // environment mid-request in unpredictable ways. Log it and let
-    // individual queries fail (and get caught by each controller's
-    // try/catch -> next(err)) instead of taking down the whole function.
     logger.error('❌  MySQL connection failed:', err.message);
   }
 }
 
-// ─── Thin query wrapper (auto-logs slow queries) ─────────────────────────────
-async function query(sql, params = []) {
+// Error codes that mean "this specific connection is dead" — worth retrying
+// once with a brand-new connection, rather than failing the whole request.
+// TiDB Cloud's public endpoint runs behind AWS Global Accelerator, which
+// silently drops any connection idle longer than ~340 seconds and explicitly
+// does not honor TCP keep-alive to prevent that (per TiDB's own docs). On
+// Vercel, a "warm" serverless instance can reuse the same pool across
+// requests spaced further apart than that window, handing back a connection
+// that LOOKS fine to mysql2 but was already killed by AWS — which is exactly
+// what was causing intermittent timeouts on some requests but not others.
+const RETRYABLE_CODES = new Set([
+  'PROTOCOL_CONNECTION_LOST',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ER_SERVER_SHUTDOWN',
+  'EPIPE',
+  'ENOTFOUND',
+]);
+
+function isRetryable(err) {
+  return RETRYABLE_CODES.has(err.code) || RETRYABLE_CODES.has(err.errno);
+}
+
+// ─── Thin query wrapper (auto-logs slow queries, retries dead connections) ───
+async function query(sql, params = [], _isRetry = false) {
   const start = Date.now();
-  const [rows] = await pool.execute(sql, params);
-  const ms = Date.now() - start;
-  if (ms > 500) logger.warn(`Slow query (${ms}ms): ${sql.slice(0, 120)}`);
-  return rows;
+  try {
+    const [rows] = await pool.execute(sql, params);
+    const ms = Date.now() - start;
+    if (ms > 500) logger.warn(`Slow query (${ms}ms): ${sql.slice(0, 120)}`);
+    return rows;
+  } catch (err) {
+    if (!_isRetry && isRetryable(err)) {
+      logger.warn(`Stale DB connection detected (${err.code}) — retrying once with a fresh connection.`);
+      return query(sql, params, true);
+    }
+    throw err;
+  }
 }
 
 // ─── Transaction helper ───────────────────────────────────────────────────────
