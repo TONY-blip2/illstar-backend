@@ -5,6 +5,7 @@ const { body }   = require('express-validator');
 const controller = require('../controllers/orderController');
 const { protect, adminOnly } = require('../middleware/auth');
 const { validate } = require('../middleware/errorHandler');
+const { upload }   = require('../utils/upload');
 
 // ── Validation rules ──────────────────────────────────────────────────────────
 const createRules = [
@@ -34,6 +35,7 @@ const statusRules = [
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 // User routes
+router.post('/upload-proof', protect, upload.single('proof'), controller.uploadProof);
 router.post('/',        protect, createRules, validate, controller.createOrder);
 router.get( '/',        protect,               controller.listOrders);
 router.get( '/:id',     protect,               controller.getOrder);

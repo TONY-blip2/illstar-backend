@@ -3,12 +3,29 @@
 const { query }          = require('../config/database');
 const emailService       = require('../utils/email');
 const logger             = require('../utils/logger');
+const { uploadToCloud }  = require('../utils/upload');
 
 // ─── Generate order ref ───────────────────────────────────────────────────────
 function generateRef() {
   const yr   = new Date().getFullYear();
   const rand = Math.floor(1000 + Math.random() * 9000);
   return `ILL-${yr}-${rand}`;
+}
+
+// ─── UPLOAD PAYMENT PROOF (authenticated users) ──────────────────────────────
+// Called before order creation — the shopper uploads a screenshot of their
+// mobile money payment, we push it to Cloudinary, and return the URL to be
+// included in the createOrder payload as proof_of_payment_url.
+async function uploadProof(req, res, next) {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded.' });
+    }
+    const url = await uploadToCloud(req.file.path, 'illstar/payment-proofs');
+    return res.json({ success: true, data: { url } });
+  } catch (err) {
+    next(err);
+  }
 }
 
 // ─── CREATE ORDER (authenticated users) ──────────────────────────────────────
@@ -27,6 +44,7 @@ async function createOrder(req, res, next) {
     const items         = body.items         ?? [];
     const payment_method = body.payment_method ?? 'mobile_money';
     const is_pickup     = body.is_pickup     ?? false;
+    const proof_of_payment_url = body.proof_of_payment_url ?? null;
     
     // Handle currency
     const currencyCode   = body.currency_used ?? body.currency_code ?? 'ZMW';
@@ -46,10 +64,19 @@ async function createOrder(req, res, next) {
       return res.status(400).json({ success: false, message: 'Order must contain at least one item.' });
     }
 
-    // Ensure unique ref (retry once on collision)
-    let ref = generateRef();
-    const existing = await query('SELECT id FROM orders WHERE order_ref = ?', [ref]);
-    if (existing.length > 0) ref = generateRef();
+    // Use the client-generated reference (already shown to the customer
+    // before they paid) if it's valid and not already taken; otherwise
+    // generate a fresh one server-side.
+    let ref = null;
+    if (body.client_ref && /^ILL-\d{4}-\d{4}$/.test(body.client_ref)) {
+      const existingClientRef = await query('SELECT id FROM orders WHERE order_ref = ?', [body.client_ref]);
+      if (existingClientRef.length === 0) ref = body.client_ref;
+    }
+    if (!ref) {
+      ref = generateRef();
+      const existing = await query('SELECT id FROM orders WHERE order_ref = ?', [ref]);
+      if (existing.length > 0) ref = generateRef();
+    }
 
     // 2. Insert directly into the `orders` table (matches your DB schema perfectly)
     await query(
@@ -58,8 +85,8 @@ async function createOrder(req, res, next) {
          country_code, province, address, items, 
          subtotal_zmw, shipping_zmw, total_zmw, 
          currency_code, currency_symbol, exchange_rate, display_total, 
-         payment_method, payment_status, order_status, is_pickup, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         payment_method, payment_status, order_status, is_pickup, notes, proof_of_payment_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         ref, 
         req.user?.id ?? null, 
@@ -82,7 +109,8 @@ async function createOrder(req, res, next) {
         'unpaid',    // default payment status
         'pending',   // default order status
         is_pickup ? 1 : 0, 
-        notes
+        notes,
+        proof_of_payment_url
       ]
     );
 
@@ -113,8 +141,6 @@ async function listOrders(req, res, next) {
     const isAdmin = req.user.role === 'admin';
     const { page = 1, limit = 20, status, search } = req.query;
 
-    // Force these to real integers up front — needed both for the offset
-    // math below and because we're about to embed them directly in the SQL.
     const limitNum = Math.max(1, parseInt(limit) || 20);
     const pageNum  = Math.max(1, parseInt(page) || 1);
     const offset   = (pageNum - 1) * limitNum;
@@ -130,18 +156,16 @@ async function listOrders(req, res, next) {
       params.push(s, s, s);
     }
 
-    // NOTE: LIMIT/OFFSET are embedded directly in the SQL string rather than
-    // bound as `?` placeholders. mysql2's prepared-statement execute() throws
+    // NOTE: LIMIT/OFFSET are embedded directly rather than bound as `?`
+    // placeholders — mysql2's prepared-statement execute() throws
     // "Incorrect arguments to mysqld_stmt_execute" in many versions when
-    // LIMIT/OFFSET are passed as parameters — this is a well-known mysql2
-    // limitation, not a security issue here, since limitNum/offset are
-    // guaranteed integers from parseInt() above (never raw user input).
+    // LIMIT/OFFSET are passed as parameters. Safe here since limitNum/offset
+    // are guaranteed integers from parseInt() above, never raw user input.
     const rows = await query(
       `SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ${limitNum} OFFSET ${offset}`,
       params
     );
 
-    // Get total count for pagination
     const [{ total }] = await query(
       `SELECT COUNT(*) AS total FROM orders ${where}`,
       params
@@ -285,4 +309,5 @@ module.exports = {
   updateOrderStatus,
   cancelOrder,
   getDashboardStats,
+  uploadProof,
 };
