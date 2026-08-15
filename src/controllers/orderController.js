@@ -321,10 +321,11 @@ async function getDashboardStats(req, res, next) {
     const recentOrders = await query(
       `SELECT id, ref AS order_ref, grand_total AS total_zmw,
               ship_first_name AS first_name, ship_last_name AS last_name,
-              ship_email AS email, status AS order_status, payment_status, created_at
+              ship_email AS email, status AS order_status, payment_status,
+              proof_of_payment_url, created_at
        FROM orders ORDER BY created_at DESC LIMIT 10`
     );
-
+    
     return res.json({
       success: true,
       data: {
