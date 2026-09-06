@@ -16,10 +16,11 @@ const logger       = require('./utils/logger');
 const { testConnection } = require('./config/database');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
 
-const authRoutes    = require('./routes/auth');
-const productRoutes = require('./routes/products');
-const orderRoutes   = require('./routes/orders');
-const userRoutes    = require('./routes/users');
+const authRoutes     = require('./routes/auth');
+const productRoutes  = require('./routes/products');
+const orderRoutes    = require('./routes/orders');
+const userRoutes     = require('./routes/users');
+const settingsRoutes = require('./routes/settings');
 
 const app = express();
 
@@ -109,6 +110,7 @@ app.use('/api/auth',     authRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/orders',   orderRoutes);
 app.use('/api/users',    userRoutes);
+app.use('/api/settings', settingsRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

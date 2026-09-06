@@ -198,6 +198,25 @@ async function sendOrderStatusUpdate(order, newStatus) {
   });
 }
 
+/**
+ * Sends the "we're live" announcement to a subscriber once the drop
+ * countdown reaches zero and the store automatically opens.
+ */
+async function sendSiteLiveEmail(email) {
+  await send({
+    to: email,
+    subject: '🚀 THE WEBSITE IS LIVE NOW — ILLSTAR',
+    type: 'site_live',
+    html: branded("We're Live!", `
+      <h2>🚀 THE WEBSITE IS LIVE NOW</h2>
+      <p>The wait is over — ILLSTAR is officially open. Shop the drop before it's gone.</p>
+      <a class="btn" href="${APP_URL}">Shop Now</a>
+      <hr class="divider">
+      <p class="small">You're receiving this because you signed up for drop notifications.</p>
+    `),
+  });
+}
+
 module.exports = {
   sendVerification,
   sendPasswordReset,
