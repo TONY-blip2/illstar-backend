@@ -19,7 +19,7 @@ async function getSiteStatus(req, res, next) {
     let isOpen = !!settings.is_open;
     const dropAt = settings.drop_at;
 
-    if (!isOpen && dropAt && new Date(dropAt) <= new Date()) {
+    if (!isOpen && dropAt && new Date(String(dropAt).replace(' ', 'T') + 'Z') <= new Date()) {
       isOpen = true;
       await query('UPDATE site_settings SET is_open = 1 WHERE id = 1');
 
