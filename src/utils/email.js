@@ -222,4 +222,5 @@ module.exports = {
   sendPasswordReset,
   sendOrderConfirmation,
   sendOrderStatusUpdate,
+  sendSiteLiveEmail,
 };

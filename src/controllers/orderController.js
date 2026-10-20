@@ -27,14 +27,11 @@ async function uploadProof(req, res, next) {
 }
 
 // ─── CREATE ORDER (authenticated users) ──────────────────────────────────────
-// NOTE ON SCHEMA: the real `orders` table (created by the original migrate.js)
-// uses column names like `ref`, `status`, `grand_total`, `ship_first_name`,
-// etc. — NOT `order_ref`/`order_status`/`total_zmw`/`first_name` the way this
-// file used to assume. Line items also live in a SEPARATE `order_items`
-// table, not a JSON blob column on `orders`. Every query below is written
-// against the REAL columns, and SELECTs alias them back to the names the
-// frontend already expects (order_ref, order_status, total_zmw, etc.) so
-// main.js needs zero changes.
+// NOTE ON SCHEMA: the real `orders` table uses column names like `ref`,
+// `status`, `grand_total`, `ship_first_name`, etc. Line items live in a
+// SEPARATE `order_items` table. Every query below is written against the REAL
+// columns, and SELECTs alias them back to the names the frontend expects
+// (order_ref, order_status, total_zmw, etc.) so main.js needs no changes.
 async function createOrder(req, res, next) {
   try {
     const body = req.body || {};
@@ -78,9 +75,6 @@ async function createOrder(req, res, next) {
       if (existing.length > 0) ref = generateRef();
     }
 
-    // valid payment_method enum values on this table: whatsapp, instagram,
-    // card, paypal, mtn, airtel — anything else (e.g. our frontend's
-    // 'mobile_money') falls back to a safe default rather than erroring.
     const VALID_PAYMENT_METHODS = ['whatsapp', 'instagram', 'card', 'paypal', 'mtn', 'airtel'];
     const dbPaymentMethod = VALID_PAYMENT_METHODS.includes(payment_method) ? payment_method : 'whatsapp';
 
@@ -140,7 +134,7 @@ async function createOrder(req, res, next) {
   }
 }
 
-// ─── LIST ORDERS (admin = all, user = own) ────────────────────────────────────
+// ─── LIST ORDERS (admin = all, user = own, minus ones they've cleared) ───────
 async function listOrders(req, res, next) {
   try {
     const isAdmin = req.user.role === 'admin';
@@ -150,7 +144,9 @@ async function listOrders(req, res, next) {
     const pageNum  = Math.max(1, parseInt(page) || 1);
     const offset   = (pageNum - 1) * limitNum;
 
-    let where  = isAdmin ? 'WHERE 1=1' : 'WHERE user_id = ?';
+    // Customers don't see orders they've cleared from their history
+    // (hidden_by_user). Admins always see everything.
+    let where  = isAdmin ? 'WHERE 1=1' : 'WHERE user_id = ? AND hidden_by_user = 0';
     const params = isAdmin ? [] : [req.user.id];
 
     if (status) { where += ' AND status = ?'; params.push(status); }
@@ -160,8 +156,6 @@ async function listOrders(req, res, next) {
       params.push(s, s, s);
     }
 
-    // Alias real column names back to what the frontend expects, so main.js
-    // needs no changes at all.
     const selectCols = `
       id, ref AS order_ref, user_id, status AS order_status, payment_method,
       payment_status, currency AS currency_code, currency_symbol,
@@ -177,9 +171,6 @@ async function listOrders(req, res, next) {
       params
     );
 
-    // Attach each order's items (from the separate order_items table) so the
-    // profile order history can still read `o.items` as an array, same as
-    // before.
     if (rows.length > 0) {
       const ids = rows.map(r => r.id);
       const placeholders = ids.map(() => '?').join(',');
@@ -309,6 +300,40 @@ async function cancelOrder(req, res, next) {
   }
 }
 
+// ─── CLEAR ORDER HISTORY (customer, from their profile) ──────────────────────
+// This only HIDES orders from the customer's own profile — the order records
+// stay in the database so your revenue, fulfilment and admin dashboard are
+// unaffected. Only finished orders are hidden; anything still being processed
+// (pending / confirmed / shipped) always stays visible.
+async function clearOrderHistory(req, res, next) {
+  try {
+    await query(
+      "UPDATE orders SET hidden_by_user = 1 WHERE user_id = ? AND status IN ('delivered', 'cancelled', 'refunded')",
+      [req.user.id]
+    );
+    return res.json({ success: true, message: 'Order history cleared.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── CLEAR ALL ORDERS (admin only) — PERMANENT ────────────────────────────────
+// Deletes EVERY order and its line items from the database. This cannot be
+// undone and resets revenue/order counts to zero. Intended for wiping test
+// orders; the frontend makes the admin type DELETE before this is called.
+async function clearAllOrders(req, res, next) {
+  try {
+    await withTransaction(async (conn) => {
+      await conn.execute('DELETE FROM order_items');
+      await conn.execute('DELETE FROM orders');
+    });
+    logger.warn(`ALL orders were cleared by admin ${req.user.email}`);
+    return res.json({ success: true, message: 'All orders cleared.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 // ─── ADMIN DASHBOARD STATS ────────────────────────────────────────────────────
 async function getDashboardStats(req, res, next) {
   try {
@@ -321,11 +346,13 @@ async function getDashboardStats(req, res, next) {
     const recentOrders = await query(
       `SELECT id, ref AS order_ref, grand_total AS total_zmw,
               ship_first_name AS first_name, ship_last_name AS last_name,
-              ship_email AS email, ship_phone AS phone, status AS order_status, payment_status,
+              ship_email AS email, ship_phone AS phone,
+              ship_province AS province, ship_country AS country_code,
+              status AS order_status, payment_status,
               proof_of_payment_url, created_at
        FROM orders ORDER BY created_at DESC LIMIT 10`
     );
-    
+
     return res.json({
       success: true,
       data: {
@@ -348,6 +375,8 @@ module.exports = {
   getOrder,
   updateOrderStatus,
   cancelOrder,
+  clearOrderHistory,
+  clearAllOrders,
   getDashboardStats,
   uploadProof,
 };

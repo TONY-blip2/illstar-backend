@@ -35,14 +35,16 @@ const statusRules = [
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 // User routes
-router.post('/upload-proof', protect, upload.single('proof'), controller.uploadProof);
+router.post('/upload-proof',  protect, upload.single('proof'), controller.uploadProof);
+router.post('/clear-history', protect,                         controller.clearOrderHistory);
 router.post('/',        protect, createRules, validate, controller.createOrder);
 router.get( '/',        protect,               controller.listOrders);
 router.get( '/:id',     protect,               controller.getOrder);
 router.patch('/:id/cancel', protect,           controller.cancelOrder);
 
 // Admin routes
-router.get(   '/admin/stats',  protect, adminOnly, controller.getDashboardStats);
-router.patch( '/:id/status',   protect, adminOnly, statusRules, validate, controller.updateOrderStatus);
+router.get(    '/admin/stats',      protect, adminOnly, controller.getDashboardStats);
+router.delete( '/admin/clear-all',  protect, adminOnly, controller.clearAllOrders);
+router.patch(  '/:id/status',       protect, adminOnly, statusRules, validate, controller.updateOrderStatus);
 
 module.exports = router;
